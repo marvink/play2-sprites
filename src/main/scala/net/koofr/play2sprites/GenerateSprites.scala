@@ -21,6 +21,11 @@ class GenerateSprites(prefix: String) extends Plugin {
     "destination sprite image file"
   )
 
+  val spritesImagePadding = SettingKey[Int](
+    pfx + "sprites-image-padding",
+    "spacing between sprite images"
+  )
+
   val spritesCssSpritePath = SettingKey[String](
     pfx + "sprites-css-sprite-path",
     "path to sprite image relative to css file"
@@ -48,12 +53,13 @@ class GenerateSprites(prefix: String) extends Plugin {
     spritesGen <<= (
       spritesSrcImages,
       spritesDestImage,
+      spritesImagePadding,
       spritesCssSpritePath,
       spritesCssClassPrefix,
       spritesDestCss,
       cacheDirectory,
       streams
-    ) map { (srcImages, destImage, relPath, cssClassPrefix, css, cache, s) =>
+    ) map { (srcImages, destImage, imagePadding, relPath, cssClassPrefix, css, cache, s) =>
         val files = srcImages.get.sortBy(_.getName)
 
         val cacheFile = cache / (pfx + "sprites")
@@ -62,7 +68,7 @@ class GenerateSprites(prefix: String) extends Plugin {
         val (previousRelation, previousInfo) = Sync.readInfo(cacheFile)(FileInfo.lastModified.format)
 
         if (!files.isEmpty && (previousInfo != currentInfos || !destImage.exists || !css.exists)) {
-          val generated = generateSprites(files, destImage, relPath, cssClassPrefix, css, s)
+          val generated = generateSprites(files, destImage, imagePadding, relPath, cssClassPrefix, css, s)
 
           Sync.writeInfo(cacheFile,
             Relation.empty[File, File] ++ generated,
@@ -74,7 +80,7 @@ class GenerateSprites(prefix: String) extends Plugin {
 
   )
 
-  def generateSprites(files: Seq[File], destImage: File, relPath: String,
+  def generateSprites(files: Seq[File], destImage: File, imagePadding: Int, relPath: String,
     cssClassPrefix: String, css: File, s: TaskStreams) = {
 
     s.log.info("Generating sprites for %d images" format (files.length))
@@ -100,7 +106,9 @@ class GenerateSprites(prefix: String) extends Plugin {
     }
 
     val width = images.map(_._2.getWidth).max
-    val height = images.map(_._2.getHeight).sum
+    val imagesHeight = images.map(_._2.getHeight).sum
+    val imagesPadding = ((images.length - 1) max 0) * imagePadding
+    val height = imagesHeight + imagesPadding
 
     val sprite = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
 
@@ -112,34 +120,45 @@ class GenerateSprites(prefix: String) extends Plugin {
 
         val cssClass = "." + cssClassPrefix + cleanName
 
-        val info = SpriteInfo(file, img.getWidth, img.getHeight, y, cssClass)
+        val info = SpriteInfo(file, img.getWidth, img.getHeight, y + imagePadding, cssClass)
 
-        (info :: processed, y + info.height)
+        (info :: processed, y + info.height + imagePadding)
     }._1.reverse
 
     val written = ImageIO.write(sprite, "png", destImage)
 
     val cssClassBodies = processed.map { info =>
-      val css = """|%s {
-        |  background-position: 0 -%dpx;
-        |  width: %dpx;
-        |  height: %dpx;
-        |}""".stripMargin
+      val css = """|%s() {
+        |  %s-dimensions();
+        |  %s-position();
+        |}""".stripMargin.format(info.cssClass,info.cssClass,info.cssClass)
 
-      css.format(info.cssClass, info.offsetY, info.width, info.height)
+      val css2 = """|%s
+                  |%s-dimensions() {
+                  |  width: %dpx;
+                  |  height: %dpx;
+                  |}""".stripMargin.format(css, info.cssClass, info.width, info.height)
+
+      val css3 = """|%s
+                   |%s-position(@xOffset: 0, @yOffset: 0) {
+                   |  background-position: @xOffset @yOffset - %dpx;
+                   |}""".stripMargin
+
+      css3.format(css2, info.cssClass, info.offsetY-imagePadding)
     }.mkString("\n\n")
 
-    val cssOutputTpl = """|%s {
-      |  background: url('%s') no-repeat;
+    val cssOutputTpl = """|.sprite() {
+      |  background-image: url('%s');
+      |  background-repeat: no-repeat;
       |}
       |
       |%s""".stripMargin
 
     val allCssClasses = processed.map(_.cssClass).mkString(",\n")
 
-    val cssOutput = cssOutputTpl format (allCssClasses, relPath, cssClassBodies)
+    val cssOutput = cssOutputTpl format (relPath, cssClassBodies)
 
-    IO.write(css, cssOutput)
+    IO.write(css,cssOutput)
 
     files.map(_ -> destImage) ++ files.map(_ -> css)
   }
